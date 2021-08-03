@@ -9,6 +9,7 @@ from maya import cmds
 # 2021
 
 
+
 kPluginCmdName = "undoBevel"
 
 
@@ -88,11 +89,33 @@ def inRange(a, b, c, d, rangeVal):
     """Returns whether or not a, b, c, and d are all within an accepted range"""
     return (max(a, b, c, d) - min(a, b, c, d)) <= rangeVal
 
+def calculateColisionPlanes(plane1, plane2, plane3):
+    n1 = plane1.normal()
+    n2 = plane2.normal()
+    n3 = plane3.normal()
+    d1 = plane1.distance()
+    d2 = plane2.distance()
+    d3 = plane3.distance()
+    n_mat = OpenMaya.MMatrix()
+
+    util = OpenMaya.MScriptUtil()
+
+    #matList = [n1.x, n1.y, n1.z, 0.0, n2.x, n2.y, n2.z, 0.0, n3.x, n3.y, n3.z, 0.0, 0.0,  0.0,  0.0,  0.0]
+    matList = [n1.x, n2.x, n3.x, 0.0, n1.y, n2.y, n3.y, 0.0, n1.z, n2.z, n3.z, 0.0, 0.0,  0.0,  0.0,  0.0]
+
+    util.createMatrixFromList(matList, n_mat)
+
+    n_mat = n_mat.inverse()
+    d_vec = OpenMaya.MPoint(d1, d2, d3)
+
+    return d_vec * n_mat  
+
 
 def calculateColision(edge, face):
     """Given a face and an edge, calculates the point of intersection if the face, and edge are extended into a plane and a line"""
     b, p = getLineFromEdge(edge)
-    n, d = getPlaneFromFace(face)
+    plane = getPlaneFromFace(face)
+    n, d = plane.normal(), plane.distance()
 
     if abs(n * p) == 0.0:
         return None 
@@ -131,16 +154,15 @@ def getPlaneFromFace(face):
     p1 = b - a 
     p2 = c - a 
     n = p1 ^ p2
-    uN = n.normal()
     d = n * c
-    plane.setPlane(uN, d) 
+    plane.setPlane(n, d) 
 
     for vertex in vertices:
         x, y, z = [cmds.pointPosition(vertex)[i] for i in (0,1,2)]
         p = OpenMaya.MVector(x, y, z)
-        if abs(p * n) < 0.05:
-             cmds.error("Non Planar")
-    return n, d
+        #if abs(p * n) < 0.05:
+             #cmds.error("Non Planar")
+    return plane
 
 
 def edgesTouching(edge1, edge2):
@@ -200,27 +222,59 @@ def matchEdge(edge1, face1, edge2, face2, movedVertices):
 
     return True
 
-def getNonSharedFaces(edge1, edge2):
-    edge1Faces = splitNames(cmds.polyListComponentConversion(edge1, fromEdge = True, toFace = True))
-    edge2Faces = splitNames(cmds.polyListComponentConversion(edge2, fromEdge = True, toFace = True))
+def matchVertices(edges):
 
-    sharedFace = edge1Faces[0]
+    faces = getNonSharedFaces(edges)
 
-    if sharedFace != edge2Faces[0] and sharedFace != edge2Faces[1]:
-        sharedFace = edge1Faces[1]
-        if sharedFace != edge2Faces[0] and sharedFace != edge2Faces[1]:
-            cmds.error("edges do not share face")
+    vertices = splitNames(cmds.polyListComponentConversion(edges, fromEdge = True, toVertex = True))
+    vertices = list(set(vertices)) #remove duplicates
 
-    face1 = edge1Faces[0]
-    face2 = edge2Faces[0]
+    planes = []
 
-    if face1 == sharedFace:
-        face1 = edge1Faces[1]
+    for face in faces:
+        planes.append(getPlaneFromFace(face))
 
-    if face2 == sharedFace:
-        face2 = edge2Faces[1]
     
-    return face1, face2
+    sumPoint = OpenMaya.MPoint(0.0,0.0,0.0)
+    averagePoint = OpenMaya.MPoint(0.0,0.0,0.0)
+
+    for i in range(len(planes) - 2):
+        colPoint = calculateColisionPlanes(planes[0], planes[1], planes[i + 2])
+        sumPoint += OpenMaya.MVector(colPoint)
+        averagePoint = sumPoint / (i + 1)
+        #if averagePoint.distanceTo(colPoint) > 0. :
+            #cmds.error("Invalid face")
+        
+
+    for vertex in vertices:
+        vertPos = cmds.pointPosition(vertex)
+
+        transX = averagePoint.x - vertPos[0]
+        transY = averagePoint.y - vertPos[1]
+        transZ = averagePoint.z - vertPos[2]
+
+
+        cmds.polyMoveVertex(vertex, translateX = transX, translateY = transY, translateZ = transZ)
+
+    cmds.polyMergeVertex(vertices, distance = 0.1)
+    return True
+
+
+def getNonSharedFaces(edges):
+    nonSharedFaces = []
+    sharedFaces = []
+    for edge in edges:
+        edgeFaces = cmds.filterExpand(cmds.polyListComponentConversion(edge, fromEdge = True, toFace = True), sm = 34)
+        for face in edgeFaces:
+            if face in nonSharedFaces:
+                nonSharedFaces.remove(face)
+                sharedFaces.append(face)
+            elif face not in sharedFaces:
+                nonSharedFaces.append(face)
+            
+    return nonSharedFaces
+        
+
 
 def shorterEdgeFirst(edge1, edge2):
     if (edgeLength(edge2) < edgeLength(edge1)):
@@ -241,8 +295,8 @@ def orderPairs(edge1, edge2, edge3, edge4, otherFaces):
         if length > longestLength:
             longestEdge = edge
             longestLength = length
-    face1, face2 = getNonSharedFaces(edge1, edge2)
-    face3, face4 = getNonSharedFaces(edge3, edge4)
+    face1, face2 = getNonSharedFaces([edge1, edge2])
+    face3, face4 = getNonSharedFaces([edge3, edge4])
     if face3 in otherFaces or face4 in otherFaces:
         return edge1, edge2, edge3, edge4
     elif face1 in otherFaces or face2 in otherFaces:
@@ -254,61 +308,66 @@ def orderPairs(edge1, edge2, edge3, edge4, otherFaces):
 
 def undoBevelFace(face, otherFaces, movedVertices):
     edges = splitNames(cmds.polyListComponentConversion(face, fromFace = True, toEdge = True))
-    if len(edges) != 4:
-        print (face, edges)
-        print (cmds.polyListComponentConversion(face, fromFace = True, toEdge = True))
-        cmds.error("Selected face must have 4 sides")
 
-    edgeCombos = []
-    edge1 = edges[0]
-    edge2 = None
-    for edge in edges:
-        if not edgesTouching(edge1, edge) and edge != edge1:
-            if edge2:
-                cmds.error("Invalid face")
-            edge2 = edge 
+    if len(edges) == 4:
+        edgeCombos = []
+        edge1 = edges[0]
+        edge2 = None
+        for edge in edges:
+            if not edgesTouching(edge1, edge) and edge != edge1:
+                if edge2:
+                    cmds.error("Invalid face")
+                edge2 = edge 
 
-    edge3 = None
-    edge4 = None 
-    for edge in edges:
-        if edgesTouching(edge1, edge):
-            if not edge3:
-                edge3 = edge
-            elif not edge4:
-                edge4 = edge
-            else:
-                cmds.error("Invalid face")
-    if not edge2 or not edge4:
-        cmds.error("Invalid face")
-    
-    edge1, edge2, edge3, edge4 = orderPairs(edge1, edge2, edge3, edge4, otherFaces)
-    
-    edgeCombos.append(shorterEdgeFirst(edge1, edge2))
-    edgeCombos.append(shorterEdgeFirst(edge3, edge4))
-    edgeCombos.append(longerEdgeFirst(edge1, edge2))
-    edgeCombos.append(longerEdgeFirst(edge3, edge4))
+        edge3 = None
+        edge4 = None 
+        for edge in edges:
+            if edgesTouching(edge1, edge):
+                if not edge3:
+                    edge3 = edge
+                elif not edge4:
+                    edge4 = edge
+                else:
+                    cmds.error("Invalid face")
+        if not edge2 or not edge4:
+            cmds.error("Invalid face")
+        
+        edge1, edge2, edge3, edge4 = orderPairs(edge1, edge2, edge3, edge4, otherFaces)
+        
+        edgeCombos.append(shorterEdgeFirst(edge1, edge2))
+        edgeCombos.append(shorterEdgeFirst(edge3, edge4))
+        edgeCombos.append(longerEdgeFirst(edge1, edge2))
+        edgeCombos.append(longerEdgeFirst(edge3, edge4))
 
-    for edge1, edge2 in edgeCombos:
-        face1, face2 = getNonSharedFaces(edge1, edge2)
-        matched = matchEdge(edge1, face1, edge2, face2, movedVertices)
-        if matched:
-            return
+        for edge1, edge2 in edgeCombos:
+            face1, face2 = getNonSharedFaces([edge1, edge2])
+            matched = matchEdge(edge1, face1, edge2, face2, movedVertices)
+            if matched:
+                return
+    else:
+        cmds.error("faces must have 4 or 3 sides")
     cmds.error("Invalid")
+
+    """elif len(edges) >= 3:
+    matched = matchVertices(edges)
+    if matched:
+        return"""
 
 def undoBevel():
     """Given selected faces, undo the bevel"""
+    print("// UndoBevel //")
     movedVertices = []
     selected = cmds.ls(orderedSelection = True, flatten = True)
+
     if len(selected) < 1:
         return
 
     if '.f[' in selected[0]:
-        print (selected)
         for face in selected:
             if '.f[' not in face:
                 cmds.error("Select either a number of faces, or 2 edges")
 
-        for face in selected:
+        for face in reversed(selected):
             undoBevelFace(face, selected, movedVertices)
 
     elif '.e[' in selected[0]:
@@ -323,13 +382,14 @@ def undoBevel():
         edgeCombos.append(longerEdgeFirst(edge1, edge2))
         
         for edge1, edge2 in edgeCombos:
-                face1, face2 = getNonSharedFaces(edge1, edge2)
+                face1, face2 = getNonSharedFaces([edge1, edge2])
                 matched = matchEdge(edge1, face1, edge2, face2, movedVertices)
                 if matched:
                     return
         cmds.error("Invalid")
     
-    cmds.polyMergeVertex(movedVertices, distance = 0.1)
+    if len(movedVertices) > 0:
+        cmds.polyMergeVertex(movedVertices, distance = 0.1)
 
     return
 
